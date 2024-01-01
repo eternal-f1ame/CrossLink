@@ -23,6 +23,7 @@ from torchvision.transforms import InterpolationMode
 import timm.optim.optim_factory as optim_factory
 
 import util.misc as misc
+from util.datasets import GaussianBlur, Solarization
 
 
 def get_args_parser():
@@ -48,6 +49,30 @@ def get_args_parser():
     parser.add_argument('--norm_pix_loss', action='store_true',
                         help='Use (per-patch) normalized pixels as targets for computing loss')
     parser.set_defaults(norm_pix_loss=False)
+
+    # CIM parameters
+    parser.add_argument('--context_size', default=176, type=int, help='size of context image')
+    parser.add_argument('--template_size', default=64, type=int, help='size of template image')
+    parser.add_argument('--template_num', default=1, type=int, help='number of template image')
+    parser.add_argument('--rotaton_max_degree', default=1, type=int, help='maximal degree of image rotation')
+    parser.add_argument('--cutout_num', default=1, type=int, help='number of cuts on image')
+    parser.add_argument('--cutout_size', default=32, type=int, help='size of cuts on image')
+    parser.add_argument('--context_min_scale', type=float, default=0.2,
+                        help='minimal scale of context image')
+    parser.add_argument('--template_min_scale', type=float, default=0.2,
+                        help='minimal scale of template image')
+    parser.add_argument('--template_max_scale', type=float, default=1.0,
+                        help='maximal scale of template image')
+    parser.add_argument('--template_min_ratio', type=float, default=1.0/3.0,
+                        help='minimal ratio of template image') 
+    parser.add_argument('--template_max_ratio', type=float, default= 3.0/1.0,
+                        help='maximal scale of template image')
+    parser.add_argument('--common_aug', action='store_true', default=False, dest='common_aug')
+    parser.add_argument('--template_aug', action='store_true', default=False, dest='template_aug')
+    parser.add_argument('--sigma_cont', type=float, default=1.0,
+                        help='loss weight for contrastive loss')
+    parser.add_argument('--sigma_corr', type=float, default=1.0,
+                        help='loss weight for correlation loss')
 
     # Optimizer parameters
     parser.add_argument('--amp', action='store_true', default=False, dest='FP16')
@@ -115,16 +140,76 @@ def main(args):
 
     cudnn.benchmark = True
 
-    
-    transform_train = transforms.Compose([
-            transforms.RandomResizedCrop(args.input_size, scale=(0.2, 1.0), interpolation=InterpolationMode.BICUBIC),  # 3 is bicubic
-            transforms.RandomHorizontalFlip(),
+    # define augmentation
+    if args.gear == "cim":
+        search = A.Compose([
+            A.RandomResizedCrop(224, 224, scale=(0.5, 1.0), interpolation=3),  # 3 is bicubic
+            A.HorizontalFlip(p=0.5),
+        ],
+        additional_targets={'image1': 'image'})
+        if args.common_aug:
+            common = transforms.Compose([
+                    transforms.RandomApply(
+                            [transforms.ColorJitter(0.4, 0.4, 0.2, 0.1)], p=0.8  # not strengthened
+                        ),
+                    transforms.RandomGrayscale(p=0.2),
+                    transforms.RandomApply([GaussianBlur(0.5, 0.1, 2.0)]),
+                    transforms.RandomApply([Solarization()], p=0.2),
+            ])
+        else:
+            common = None
+
+        if args.template_aug:
+            template = transforms.Compose([
+                    transforms.RandomHorizontalFlip(),
+            ])
+        else:
+            template = None
+
+        post_context = transforms.Compose([
             transforms.ToTensor(),
-            transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])])
+            transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
+            # Cutout(cutout_num=args.cutout_num, cutout_size=args.cutout_size)
+        ])
+
+        post_template = transforms.Compose([
+            transforms.ToTensor(),
+            transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
+            # Cutout(cutout_num=args.cutout_num, cutout_size=args.cutout_size)
+        ])
+
+        transform_train = {
+            "search": search,
+            "common": common,
+            "template": template,
+            "post_context": post_context,
+            "post_template": post_template,
+        }
+
+    else:
+        transform_train = transforms.Compose([
+                transforms.RandomResizedCrop(args.input_size, scale=(0.2, 1.0), interpolation=InterpolationMode.BICUBIC),  # 3 is bicubic
+                transforms.RandomHorizontalFlip(),
+                transforms.ToTensor(),
+                transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])])
     
 
+    if args.gear == "cim":
+        dataset_train = CorrlationDataset(
+            os.path.join(args.data_path, 'train'),
+            # coords_file="coords.json",
+            search_size=args.input_size,
+            context_size=args.context_size,
+            template_size=args.template_size,
+            template_num=args.template_num,
+            scale=(args.template_min_scale, args.template_max_scale),
+            ratio=(args.template_min_ratio, args.template_max_ratio), #(3.0 / 4.0, 4.0 / 3.0),
+            degree=args.rotaton_max_degree,
+            transform=transform_train
+        )
 
-    dataset_train = datasets.ImageFolder(os.path.join(args.data_path, 'train'), transform=transform_train)
+    else:
+        dataset_train = datasets.ImageFolder(os.path.join(args.data_path, 'train'), transform=transform_train)
 
     print(dataset_train)
 
@@ -159,6 +244,18 @@ def main(args):
         model = models.__dict__[model_name](
             norm_pix_loss=args.norm_pix_loss, 
             img_size=args.input_size,
+        )
+    elif args.gear == "cim":
+        import models.cim as models
+        from engines.pretrain_cim import train_one_epoch
+        model_name = args.gear + "_" +args.model
+        model = models.__dict__[model_name](
+            img_size=args.input_size,
+            context_size=args.context_size,
+            template_size=args.template_size,
+            accum_iter=args.accum_iter,
+            sigma_cont=args.sigma_cont,
+            sigma_corr=args.sigma_corr,
         )
         
     else:

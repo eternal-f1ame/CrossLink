@@ -218,7 +218,301 @@ def xyxy_to_xywh(xyxy):
         raise TypeError('Argument xyxy must be a list, tuple, or numpy array.')
 
 
+def revise_box(corners, mask_nonzeros, degree):
 
+    revise_corners = []
+    region_x = mask_nonzeros[:, 0].numpy()
+    region_y = mask_nonzeros[:, 1].numpy()
+
+    # """
+    for idx, corner in enumerate(corners):
+        x, y = corner
+        # top_left
+        if idx == 0:
+            if not check_xy_in_region(corner, mask_nonzeros):
+                if degree > 0:
+                    y_index = np.where(region_y==y)[0].tolist()
+                    x_r = region_x[y_index].min()
+                    revise_corners.append((x_r, y))
+                else:
+                    x_index = np.where(region_x==x)[0].tolist()
+                    y_r = region_y[x_index].min()
+                    revise_corners.append((x, y_r))
+            else:
+                revise_corners.append(corner)
+        # top_right
+        elif idx == 1:
+            x1_r, y1_r = revise_corners[0]
+            if not check_xy_in_region(corner, mask_nonzeros):
+                if degree > 0:
+                    x_index = np.where(region_x==x1_r)[0].tolist()
+                    y2_r = region_y[x_index].max()
+                    revise_corners.append((x1_r, y2_r))
+                else:
+                    y_index = np.where(region_y==y)[0].tolist()
+                    x_r = region_x[y_index].min()
+                    revise_corners.append((x_r, y))
+                    revise_corners[0] = (x_r, y1_r)
+            else:
+                if degree > 0:
+                    revise_corners.append((x1_r, y))
+                else:
+                    revise_corners.append(corner)
+        
+        # bottom_left
+        elif idx == 2:
+            x1_r, y1_r = revise_corners[0]
+            x1_r, y2_r = revise_corners[1]
+            if not check_xy_in_region(corner, mask_nonzeros):
+                if degree > 0:
+                    x_index = np.where(region_x==x)[0].tolist()
+                    y1_r = region_y[x_index].min()
+                    revise_corners.append((x, y1_r))
+                    revise_corners[0] = (x1_r, y1_r)
+                else:
+                    y_index = np.where(region_y==y1_r)[0].tolist()
+                    x2_r = region_x[y_index].max()
+                    revise_corners.append((x2_r, y1_r))
+            else:
+                if degree > 0:
+                    revise_corners.append(corner)
+                else:
+                    revise_corners.append((x, y1_r))
+        # bottom_right
+        elif idx == 3:
+            x1_r, y1_r = revise_corners[0]
+            x1_r, y2_r = revise_corners[1]
+            x2_r, y1_r = revise_corners[2]
+            br_corner = (x2_r, y2_r)
+            if not check_xy_in_region(br_corner, mask_nonzeros):
+                if degree > 0:
+                    y_index = np.where(region_y==y2_r)[0].tolist()
+                    x2_r = region_x[y_index].max()
+                    revise_corners.append((x2_r, y2_r))
+                    revise_corners[2] = (x2_r, y1_r)
+                else:
+                    x_index = np.where(region_x==x2_r)[0].tolist()
+                    y2_r = region_y[x_index].max()
+                    revise_corners.append((x2_r, y2_r))
+                    revise_corners[1] = (x1_r, y2_r)
+            else:
+                revise_corners.append(br_corner)
+    return revise_corners
+
+
+class CorrelationDataset(datasets.ImageFolder):
+    """
+    Dataset for Correlation Image Modeling
+    Args:
+        data_path (str): Path to the dataset
+        search_size (int): Size of the search image
+        context_size (int): Size of the context image
+        template_size (int): Size of the template image
+        template_num (int): Number of template images
+        scale (tuple): Scale range for search image
+        ratio (tuple): Ratio range for search image
+        degree (int): Degree range for search image
+        interpolation (InterpolationMode): Interpolation mode for search image
+        transform (dict): Transformations for search, context and template images
+    """
+
+    def __init__(
+        self,
+        data_path,
+        search_size=224,
+        context_size=176,
+        template_size=64,
+        template_num=6,
+        scale=(0.2, 1.0),
+        ratio=(1.0, 1.0),
+        degree=45,
+        interpolation=InterpolationMode.BICUBIC,
+        transform=None,
+    ):
+
+        super(CorrelationDataset, self).__init__(data_path)
+
+        self.search_size = search_size
+        self.context_size = context_size
+        self.template_size = template_size
+        self.template_num = template_num
+        self.scale = scale
+        self.ratio = ratio
+        self.degree = degree
+        self.interpolation = interpolation
+        self.transform = transform
+
+    def __getitem__(self, index):
+        path, _ = self.samples[index]
+        image = self.loader(path)
+        
+        search_image = self.transform["search"](image=np.array(image))['image']
+        search_image = PIL.Image.fromarray(search_image)
+
+        masks = []
+        template_images = []
+        for _ in range(self.template_num):
+            degree = torch.randint(-self.degree, self.degree, size=(1,)).item()
+            W, H = search_image.size
+            i, j, h, w = get_params(search_image, self.scale, self.ratio)
+            
+            tmp_mask_img = torch.ones(1, H, W).type(torch.uint8)
+            tmp_mask_img[:, i:i+h,j:j+w] = 2
+
+            rotate_search_img  = F.rotate(search_image, degree, expand=1)
+            rotate_mask_img  = F.rotate(tmp_mask_img, degree, expand=1)
+
+            region_mask = rotate_mask_img == 2
+            mask = rotate_mask_img.squeeze(0)
+            mask_nonzeros = mask.nonzero()
+
+            region_nonzeros = (mask == 2).nonzero()
+            x1, x2 = region_nonzeros[:, 0].min().item(), region_nonzeros[:, 0].max().item()
+            y1, y2 = region_nonzeros[:, 1].min().item(), region_nonzeros[:, 1].max().item()
+
+            corners = [(x1, y1), (x1, y2), (x2, y1), (x2, y2)] # top_left, top_right, bottom_left, bottom_right
+
+            revise_corners = revise_box(corners, mask_nonzeros, degree)
+            x1_r, y1_r = revise_corners[0]
+            x2_r, y2_r = revise_corners[3]
+            i_r, j_r, h_r, w_r = xyxy_to_xywh([x1_r, y1_r, x2_r, y2_r])
+            template_image = F.resized_crop(rotate_search_img, i_r, j_r, h_r, w_r, (self.template_size, self.template_size), self.interpolation)
+            
+            rotate_mask_img[:, x1_r:x2_r+1, y1_r:y2_r+1] = 3
+
+            reverse_search_img  = F.rotate(rotate_search_img, -degree, expand=0)
+            reverse_mask_img  = F.rotate(rotate_mask_img, -degree, expand=0)
+
+            reverse_mask_img_nonzeros = reverse_mask_img.squeeze(0).nonzero()
+
+            x1_rr, x2_rr = reverse_mask_img_nonzeros[:, 0].min().item(), reverse_mask_img_nonzeros[:, 0].max().item()
+            y1_rr, y2_rr = reverse_mask_img_nonzeros[:, 1].min().item(), reverse_mask_img_nonzeros[:, 1].max().item()
+
+            i_rr, j_rr, h_rr, w_rr = xyxy_to_xywh([x1_rr, y1_rr, x2_rr, y2_rr])
+            
+            crop_search_img = F.resized_crop(reverse_search_img, i_rr, j_rr, h_rr, w_rr, (self.context_size, self.context_size), self.interpolation)
+            crop_mask_img = F.resized_crop(reverse_mask_img, i_rr, j_rr, h_rr, w_rr, (self.context_size, self.context_size), self.interpolation)
+
+            region_mask = crop_mask_img == 3
+            mask_ = torch.zeros(1, self.context_size, self.context_size).to(torch.int64)
+            mask_.masked_fill_(region_mask, 1)
+            masks.append(mask_[0])
+            template_images.append(template_image)
+
+        context_image = F.resize(search_image, (self.context_size, self.context_size), self.interpolation)
+        context_image = self.transform["post_context"](context_image)
+
+        temp_images = []
+        for template_image in template_images:
+            if self.transform["common"]:
+                template_image = self.transform["common"](template_image)
+            if self.transform["template"]:
+                template_image = self.transform["template"](template_image)
+            template_image = self.transform["post_template"](template_image)
+            temp_images.append(template_image)
+
+        return context_image, temp_images, masks
+    
+
+class RationaleCorrelationDataset(CorrelationDataset):
+
+    def __init__(self, data_path, coords_file, *args, **kwargs):
+        super(RationaleCorrelationDataset, self).__init__(data_path, *args, **kwargs)
+        self.coords_file = coords_file
+        self.coords = json.load(open(self.coords_file, "r"))
+
+    def __getitem__(self, index):
+        path, _ = self.samples[index]
+        image = self.loader(path)
+
+        search_image_data = self.coords[path]
+
+        crops = {
+            'eye':None,
+            'nose':None,
+            'lips':None
+            }
+        for c in search_image_data.keys():
+            x, y, h, w = search_image_data[c]["x"], search_image_data[c]["y"], search_image_data[c]["height"], search_image_data[c]["width"]
+            i, j, h, w = int(x - w/2), int(y - h/2), int(h), int(w)
+            crops[c] = (i, j, h, w)
+
+        H, W = image.size
+        masks = []
+        template_images = []
+        for c in search_image_data.keys():
+            try:
+                tmp_mask_img = np.uint8(np.ones((W, H)))
+                i, j, h, w = crops[c]
+                tmp_mask_img[j:j+h, i:i+w] = 2
+
+                transformed = self.transform["search"](image=np.array(image), image1=tmp_mask_img)
+                search_image = transformed['image']
+                search_image = PIL.Image.fromarray(search_image)
+                tmp_mask_img = transformed['image1']
+                degree = torch.randint(-self.degree, self.degree, size=(1,)).item()
+
+                # convert to tensor
+                tmp_mask_img = torch.from_numpy(tmp_mask_img).unsqueeze(0)
+
+                rotate_search_img  = F.rotate(search_image, degree, expand=1)
+                rotate_mask_img  = F.rotate(tmp_mask_img, degree, expand=1)
+
+                region_mask = rotate_mask_img == 2
+                mask = rotate_mask_img.squeeze(0)
+                mask_nonzeros = mask.nonzero()
+
+                region_nonzeros = (mask == 2).nonzero()
+                x1, x2 = region_nonzeros[:, 0].min().item(), region_nonzeros[:, 0].max().item()
+                y1, y2 = region_nonzeros[:, 1].min().item(), region_nonzeros[:, 1].max().item()
+
+                corners = [(x1, y1), (x1, y2), (x2, y1), (x2, y2)] # top_left, top_right, bottom_left, bottom_right
+
+                revise_corners = revise_box(corners, mask_nonzeros, degree)
+                x1_r, y1_r = revise_corners[0]
+                x2_r, y2_r = revise_corners[3]
+                i_r, j_r, h_r, w_r = xyxy_to_xywh([x1_r, y1_r, x2_r, y2_r])
+                template_image = F.resized_crop(rotate_search_img, i_r, j_r, h_r, w_r, (self.template_size, self.template_size), self.interpolation)
+                
+                rotate_mask_img[:, x1_r:x2_r+1, y1_r:y2_r+1] = 3
+
+                reverse_search_img  = F.rotate(rotate_search_img, -degree, expand=0)
+                reverse_mask_img  = F.rotate(rotate_mask_img, -degree, expand=0)
+
+                reverse_mask_img_nonzeros = reverse_mask_img.squeeze(0).nonzero()
+
+                x1_rr, x2_rr = reverse_mask_img_nonzeros[:, 0].min().item(), reverse_mask_img_nonzeros[:, 0].max().item()
+                y1_rr, y2_rr = reverse_mask_img_nonzeros[:, 1].min().item(), reverse_mask_img_nonzeros[:, 1].max().item()
+
+                i_rr, j_rr, h_rr, w_rr = xyxy_to_xywh([x1_rr, y1_rr, x2_rr, y2_rr])
+                
+                crop_search_img = F.resized_crop(reverse_search_img, i_rr, j_rr, h_rr, w_rr, (self.context_size, self.context_size), self.interpolation)
+                crop_mask_img = F.resized_crop(reverse_mask_img, i_rr, j_rr, h_rr, w_rr, (self.context_size, self.context_size), self.interpolation)
+
+                region_mask = crop_mask_img == 3
+                mask_ = torch.zeros(1, self.context_size, self.context_size).to(torch.int64)
+                mask_.masked_fill_(region_mask, 1)
+                masks.append(mask_[0])
+                template_images.append(template_image)
+
+            except:
+                continue
+        if template_images == []:
+            return self.__getitem__(random.randint(0, len(self.samples)-1))
+
+        context_image = F.resize(search_image, (self.context_size, self.context_size), self.interpolation)
+        context_image = self.transform["post_context"](context_image)
+
+        temp_images = []
+        for template_image in template_images:
+            if self.transform["common"]:
+                template_image = self.transform["common"](template_image)
+            if self.transform["template"]:
+                template_image = self.transform["template"](template_image)
+            template_image = self.transform["post_template"](template_image)
+            temp_images.append(template_image)
+        sel = random.randint(0, len(temp_images)-1)
+        return context_image, temp_images[sel:sel+1], masks[sel:sel+1]
 
 class BaseCrossModalIMDataset(datasets.ImageFolder):
     """
@@ -254,6 +548,123 @@ class BaseCrossModalIMDataset(datasets.ImageFolder):
         if self.transform is not None:
             images, images_ = self.transform(images=images, images_=images_)
         return images, images_
+
+    def __len__(self):
+        return len(self.samples)
+    
+class CrossModalCIMDataset(BaseCrossModalIMDataset):
+    """
+    Dataset for Cross-Modal Correlation Image Modeling
+    Args:
+        data_path (str): Path to the dataset
+        data_path_ (str): Path to the dataset
+        img_size (int): Size of the image
+        transform (dict): Transformations for image
+    """
+    def __init__(
+        self,
+        data_path,
+        data_path_,
+        context_size=176,
+        template_size=64,
+        template_num=6,
+        scale=(0.2, 1.0),
+        ratio=(1.0, 1.0),
+        degree=45,
+        interpolation=InterpolationMode.BICUBIC,
+        transform=None,
+        *args,
+        **kwargs
+    ):
+        super(CrossModalCIMDataset, self).__init__(data_path, data_path_, *args, **kwargs)
+        self.search_size = self.img_size
+        self.context_size = context_size
+        self.template_size = template_size
+        self.template_num = template_num
+        self.scale = scale
+        self.ratio = ratio
+        self.degree = degree
+        self.interpolation = interpolation
+        self.transform = transform
+    
+    def __getitem__(self, index):
+        path, _ = self.samples[index]
+        path_, _ = self.samples_[index]
+        images, images_ = self.loader(path), self.loader(path_)
+        images, images_ = self.transform(images=images, images_=images_)
+
+        search_images_list = self.transform["search"](image=np.array(images), image_=np.array(images_))
+        search_image, search_image_ = search_images_list['image'], search_images_list['image_']
+
+        if random.random() > 0.5:
+            search_image, search_image_ = search_image_, search_image
+
+        search_image = PIL.Image.fromarray(search_image)
+        search_image_ = PIL.Image.fromarray(search_image_)
+
+        masks = []
+        template_images = []
+        for _ in range(self.template_num):
+            degree = torch.randint(-self.degree, self.degree, size=(1,)).item()
+            W, H = search_image.size
+            i, j, h, w = get_params(search_image, self.scale, self.ratio)
+            
+            tmp_mask_img = torch.ones(1, H, W).type(torch.uint8)
+            tmp_mask_img[:, i:i+h,j:j+w] = 2
+
+            rotate_search_img  = F.rotate(search_image, degree, expand=1)
+            rotate_mask_img  = F.rotate(tmp_mask_img, degree, expand=1)
+
+            region_mask = rotate_mask_img == 2
+            mask = rotate_mask_img.squeeze(0)
+            mask_nonzeros = mask.nonzero()
+
+            region_nonzeros = (mask == 2).nonzero()
+            x1, x2 = region_nonzeros[:, 0].min().item(), region_nonzeros[:, 0].max().item()
+            y1, y2 = region_nonzeros[:, 1].min().item(), region_nonzeros[:, 1].max().item()
+
+            corners = [(x1, y1), (x1, y2), (x2, y1), (x2, y2)] # top_left, top_right, bottom_left, bottom_right
+
+            revise_corners = revise_box(corners, mask_nonzeros, degree)
+            x1_r, y1_r = revise_corners[0]
+            x2_r, y2_r = revise_corners[3]
+            i_r, j_r, h_r, w_r = xyxy_to_xywh([x1_r, y1_r, x2_r, y2_r])
+            template_image = F.resized_crop(rotate_search_img, i_r, j_r, h_r, w_r, (self.template_size, self.template_size), self.interpolation)
+            
+            rotate_mask_img[:, x1_r:x2_r+1, y1_r:y2_r+1] = 3
+
+            reverse_search_img  = F.rotate(rotate_search_img, -degree, expand=0)
+            reverse_mask_img  = F.rotate(rotate_mask_img, -degree, expand=0)
+
+            reverse_mask_img_nonzeros = reverse_mask_img.squeeze(0).nonzero()
+
+            x1_rr, x2_rr = reverse_mask_img_nonzeros[:, 0].min().item(), reverse_mask_img_nonzeros[:, 0].max().item()
+            y1_rr, y2_rr = reverse_mask_img_nonzeros[:, 1].min().item(), reverse_mask_img_nonzeros[:, 1].max().item()
+
+            i_rr, j_rr, h_rr, w_rr = xyxy_to_xywh([x1_rr, y1_rr, x2_rr, y2_rr])
+            
+            crop_search_img = F.resized_crop(reverse_search_img, i_rr, j_rr, h_rr, w_rr, (self.context_size, self.context_size), self.interpolation)
+            crop_mask_img = F.resized_crop(reverse_mask_img, i_rr, j_rr, h_rr, w_rr, (self.context_size, self.context_size), self.interpolation)
+
+            region_mask = crop_mask_img == 3
+            mask_ = torch.zeros(1, self.context_size, self.context_size).to(torch.int64)
+            mask_.masked_fill_(region_mask, 1)
+            masks.append(mask_[0])
+            template_images.append(template_image)
+
+        context_image = F.resize(search_image_, (self.context_size, self.context_size), self.interpolation)
+        context_image = self.transform["post_context"](context_image)
+
+        temp_images = []
+        for template_image in template_images:
+            if self.transform["common"]:
+                template_image = self.transform["common"](template_image)
+            if self.transform["template"]:
+                template_image = self.transform["template"](template_image)
+            template_image = self.transform["post_template"](template_image)
+            temp_images.append(template_image)
+
+        return context_image, temp_images, masks
 
     def __len__(self):
         return len(self.samples)
