@@ -18,6 +18,14 @@ conda activate cim
 conda install pytorch torchvision cudatoolkit=11.3 -c pytorch -y
 ```
 
+- Navigate to the root directory of this repository:
+```bash
+cd CrossLink
+
+# Install other requirements
+pip install -r requirements.txt
+```
+
 ## Pretrain
 
 To pre-train `<method = any(mim, dino, cim)>` using `ViT-Small` as the backbone, run the following on 8 A100 GPUs with port 8888:
