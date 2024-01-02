@@ -28,7 +28,7 @@ pip install -r requirements.txt
 
 ## Pretrain
 
-To pre-train `<method = any(mim, dino, cim)>` using `ViT-Small` as the backbone, run the following on 8 A100 GPUs with port 8888:
+To pre-train `<method = any(mim, dino, cim)>` using `ViT-Small` as the backbone, run the following on GPUs with port 8888:
 ```shell
-sh scripts/dist_pretrain.sh 8 8888 <path-to-imagenet> <method> small none <job-name>
+sh scripts/dist_pretrain.sh 1 8888 <path-to-imagenet> <method> small none <job-name>
 ```
