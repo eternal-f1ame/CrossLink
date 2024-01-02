@@ -23,7 +23,8 @@ from torchvision.transforms import InterpolationMode
 import timm.optim.optim_factory as optim_factory
 
 import util.misc as misc
-from util.datasets import GaussianBlur, Solarization
+from models.dino import DataAugmentationDINO
+from util.datasets import GaussianBlur, Solarization, CorrlationDataset, HeirarchialBiometricDataset
 
 
 def get_args_parser():
@@ -73,6 +74,46 @@ def get_args_parser():
                         help='loss weight for contrastive loss')
     parser.add_argument('--sigma_corr', type=float, default=1.0,
                         help='loss weight for correlation loss')
+    # Dino parameters
+    parser.add_argument('--global_crops_scale', type=float, nargs='+', default=(0.4, 1.),
+        help="""Scale range of the cropped image before resizing, relatively to the origin image.
+        Used for large global view cropping. When disabling multi-crop (--local_crops_number 0), we
+        recommand using a wider range of scale ("--global_crops_scale 0.14 1." for example)""")
+    parser.add_argument('--local_crops_number', type=int, default=8, help="""Number of small
+        local views to generate. Set this parameter to 0 to disable multi-crop training.
+        When disabling multi-crop we recommend to use "--global_crops_scale 0.14 1." """)
+    parser.add_argument('--local_crops_scale', type=float, nargs='+', default=(0.05, 0.4),
+        help="""Scale range of the cropped image before resizing, relatively to the origin image.
+        Used for small local view cropping of multi-crop.""")
+    parser.add_argument('--warmup_teacher_temp', default=0.04, type=float,
+        help="""Initial value for the teacher temperature: 0.04 works well in most cases.
+        Try decreasing it if the training loss does not decrease.""")
+    parser.add_argument('--teacher_temp', default=0.04, type=float, help="""Final value (after linear warmup)
+        of the teacher temperature. For most experiments, anything above 0.07 is unstable. We recommend
+        starting with the default value of 0.04 and increase this slightly if needed.""")
+    parser.add_argument('--warmup_teacher_temp_epochs', default=0, type=int,
+        help='Number of warmup epochs for the teacher temperature (Default: 30).')
+    parser.add_argument('--out_dim', default=65536, type=int,
+        help="""Dimensionality of the projection head. When using ViT, 768 features seem to work well, but
+        'you can set it to 512 for other architectures.""")
+    parser.add_argument('--use_bn_in_head', action='store_true', default=False,
+        help="""Whether to use batch normalizations in projection head.""")
+    parser.add_argument('--norm_last_layer', action='store_true', default=False,
+        help="""Whether to normalize the last layer in the projection head.""")
+    parser.add_argument('--weight_decay_end', type=float, default=0.4, help="""Final value of the
+            weight decay. We use a cosine schedule for WD and using a larger decay by
+            the end of training improves performance for ViTs.""") 
+    parser.add_argument('--momentum_teacher', default=0.996, type=float, help="""Base EMA
+            parameter for teacher update. The value is increased to 1 during training with cosine schedule.
+            We recommend setting a higher value with small batches: for example use 0.9995 with batch size of 256.""")
+    parser.add_argument('--use_fp16', type=misc.bool_flag, default=True, help="""Whether or not
+        to use half precision for training. Improves training time and memory requirements,
+        but can provoke instability and slight decay of performance. We recommend disabling
+        mixed precision if the loss is unstable, if reducing the patch size or if training with bigger ViTs.""")
+    parser.add_argument('--drop_path_rate', type=float, default=0.1, help="stochastic depth rate")
+    parser.add_argument('--freeze_last_layer', default=1, type=int, help="""Number of epochs
+        during which we keep the output layer fixed. Typically doing so during
+        the first epoch helps training. Try increasing this value if the loss does not decrease.""")
 
     # Optimizer parameters
     parser.add_argument('--amp', action='store_true', default=False, dest='FP16')
@@ -185,7 +226,13 @@ def main(args):
             "post_context": post_context,
             "post_template": post_template,
         }
-
+    elif args.gear == "dino":
+        transform_train = DataAugmentationDINO(
+                args.global_crops_scale,
+                args.local_crops_scale,
+                args.local_crops_number,
+            )
+    
     else:
         transform_train = transforms.Compose([
                 transforms.RandomResizedCrop(args.input_size, scale=(0.2, 1.0), interpolation=InterpolationMode.BICUBIC),  # 3 is bicubic
@@ -256,6 +303,19 @@ def main(args):
             accum_iter=args.accum_iter,
             sigma_cont=args.sigma_cont,
             sigma_corr=args.sigma_corr,
+        )
+    elif args.gear == "dino":
+        from models.dino import DINOViT
+        from engines.pretrain_dino import train_one_epoch
+        model_name = args.model
+        model = DINOViT(
+            model_name,
+            local_crops_number=args.local_crops_number,
+            warmup_teacher_temp=args.warmup_teacher_temp,
+            teacher_temp=args.teacher_temp,
+            warmup_teacher_temp_epochs=args.warmup_teacher_temp_epochs,
+            epochs=args.epochs,
+            args=args,
         )
         
     else:
