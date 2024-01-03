@@ -697,6 +697,3 @@ class CrossModalMIMDataset_(BaseCrossModalIMDataset):
     
     def __len__(self):
         return len(self.samples)
-    
-
-

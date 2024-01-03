@@ -5,6 +5,7 @@ from util import misc
 from util import lars
 from util import lr_sched
 from typing import Iterable
+from util.gradcam import gradmap
 
 
 def train_one_epoch(model: torch.nn.Module,
@@ -44,6 +45,7 @@ def train_one_epoch(model: torch.nn.Module,
         else:
             images, _ = val
             images_ = None
+
         # update weight decay and learning rate according to their schedule
         data_iter_step = len(data_loader) * epoch + data_iter_step  # global training iteration
         for i, param_group in enumerate(optimizer.param_groups):
@@ -58,6 +60,8 @@ def train_one_epoch(model: torch.nn.Module,
         else:
             images_ = images
 
+        if args.gradcam:
+            images[2:] = gradmap(student, images, args.local_crops_number - 2)
         # teacher and student forward passes + compute dino loss
         with torch.cuda.amp.autocast(fp16_scaler is not None):
             teacher_output = teacher(images_[:2]) # only the 2 global views pass through the teacher
