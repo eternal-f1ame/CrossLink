@@ -591,7 +591,6 @@ class CrossModalCIMDataset(BaseCrossModalIMDataset):
         path, _ = self.samples[index]
         path_, _ = self.samples_[index]
         images, images_ = self.loader(path), self.loader(path_)
-        images, images_ = self.transform(images=images, images_=images_)
 
         search_images_list = self.transform["search"](image=np.array(images), image_=np.array(images_))
         search_image, search_image_ = search_images_list['image'], search_images_list['image_']
@@ -669,7 +668,7 @@ class CrossModalCIMDataset(BaseCrossModalIMDataset):
     def __len__(self):
         return len(self.samples)
 
-class CrossModalMIMDataset_(BaseCrossModalIMDataset):
+class CrossModalMIMDataset(BaseCrossModalIMDataset):
     """
     Dataset for Cross-Modal Correlation Image Modeling
     Args:
@@ -685,7 +684,7 @@ class CrossModalMIMDataset_(BaseCrossModalIMDataset):
         *args,
         **kwargs
     ):
-        super(CrossModalMIMDataset_, self).__init__(data_path, data_path_, *args, **kwargs)
+        super(CrossModalMIMDataset, self).__init__(data_path, data_path_, *args, **kwargs)
     
     def __getitem__(self, index):
         path, _ = self.samples[index]

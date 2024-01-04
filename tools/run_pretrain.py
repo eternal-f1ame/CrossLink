@@ -24,7 +24,7 @@ import timm.optim.optim_factory as optim_factory
 
 import util.misc as misc
 from models.dino import DataAugmentationDINO
-from util.datasets import GaussianBlur, Solarization, CorrlationDataset, HeirarchialBiometricDataset
+from util.datasets import GaussianBlur, Solarization, CrossModalCIMDataset, CorrelationDataset, CrossModalMIMDataset
 
 
 def get_args_parser():
@@ -35,10 +35,13 @@ def get_args_parser():
     parser.add_argument('--save_per_epochs', default=10, type=int)
     parser.add_argument('--accum_iter', default=1, type=int,
                         help='Accumulate gradient iterations (for increasing the effective batch size under memory constraints)')
+    parser.add_argument('--gradcam', action='store_true', default=False, help="""Enable Rationale: Adaptive Rationale""")
+    parser.add_argument('--gfb', action='store_true', default=False, help="""Common Rationale""")
 
     # Model parameters
     parser.add_argument('--gear', default='mae', type=str, metavar='GEAR',
                         help='Name of gear to train')
+    parser.add_argument('--dual', action='store_true', default=True, help="""Weight decay.""")
     parser.add_argument('--model', default='vit_large_patch16', type=str, metavar='MODEL',
                         help='Name of model to train')
     parser.add_argument('--input_size', default=224, type=int,
@@ -115,6 +118,8 @@ def get_args_parser():
         during which we keep the output layer fixed. Typically doing so during
         the first epoch helps training. Try increasing this value if the loss does not decrease.""")
 
+
+
     # Optimizer parameters
     parser.add_argument('--amp', action='store_true', default=False, dest='FP16')
     parser.set_defaults(amp=False)
@@ -134,6 +139,8 @@ def get_args_parser():
     # Dataset parameters
     parser.add_argument('--data_path', default='/datasets01/imagenet_full_size/061417/', type=str,
                         help='dataset path')
+    parser.add_argument('--data_path_', default='/datasets01/imagenet_full_size/061417/', type=str,
+                        help='dataset path alternate modality')
     parser.add_argument('--output_dir', default='./output_dir',
                         help='path where to save, empty for no saving')
     parser.add_argument('--log_dir', default='./output_dir',
@@ -187,7 +194,7 @@ def main(args):
             A.RandomResizedCrop(224, 224, scale=(0.5, 1.0), interpolation=3),  # 3 is bicubic
             A.HorizontalFlip(p=0.5),
         ],
-        additional_targets={'image1': 'image'})
+        additional_targets={'image_': 'image_'})
         if args.common_aug:
             common = transforms.Compose([
                     transforms.RandomApply(
@@ -242,21 +249,39 @@ def main(args):
     
 
     if args.gear == "cim":
-        dataset_train = CorrlationDataset(
-            os.path.join(args.data_path, 'train'),
-            # coords_file="coords.json",
-            search_size=args.input_size,
-            context_size=args.context_size,
-            template_size=args.template_size,
-            template_num=args.template_num,
-            scale=(args.template_min_scale, args.template_max_scale),
-            ratio=(args.template_min_ratio, args.template_max_ratio), #(3.0 / 4.0, 4.0 / 3.0),
-            degree=args.rotaton_max_degree,
-            transform=transform_train
-        )
+        if not args.dual:
+            dataset_train = CorrelationDataset(
+                os.path.join(args.data_path, 'train'),
+                context_size=args.context_size,
+                template_size=args.template_size,
+                template_num=args.template_num,
+                scale=(args.template_min_scale, args.template_max_scale),
+                ratio=(args.template_min_ratio, args.template_max_ratio), #(3.0 / 4.0, 4.0 / 3.0),
+                degree=args.rotaton_max_degree,
+                transform=transform_train
+            )
+        else:
+            dataset_train = CrossModalCIMDataset(
+                os.path.join(args.data_path, 'train'),
+                os.path.join(args.data_path, 'train'),
+                context_size=args.context_size,
+                template_size=args.template_size,
+                template_num=args.template_num,
+                scale=(args.template_min_scale, args.template_max_scale),
+                ratio=(args.template_min_ratio, args.template_max_ratio), #(3.0 / 4.0, 4.0 / 3.0),
+                degree=args.rotaton_max_degree,
+                transform=transform_train
+            )
 
     else:
-        dataset_train = datasets.ImageFolder(os.path.join(args.data_path, 'train'), transform=transform_train)
+        if not args.dual:
+            dataset_train = datasets.ImageFolder(os.path.join(args.data_path, 'train'), transform=transform_train)
+        else:
+            dataset_train = CrossModalMIMDataset(
+                os.path.join(args.data_path, 'train'),
+                os.path.join(args.data_path_, 'train'),
+                transform=transform_train
+            )
 
     print(dataset_train)
 
