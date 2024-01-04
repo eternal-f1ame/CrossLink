@@ -1,9 +1,12 @@
 import argparse
+from typing import Any
 import cv2
 import numpy as np
 from PIL import Image
 
 import torch
+import torch.nn as nn
+import torch.nn.functional as F
 from torchvision import transforms
 from pytorch_grad_cam import GradCAM
 from pytorch_grad_cam.utils.image import preprocess_image
@@ -133,4 +136,55 @@ def gradmap(model, images, num_crops=6):
             crops.append(crop)
         c+=1
     crops = crops[:num_crops]
-    return crops
+    return crops, grayscale_cam
+
+class GFB(object):
+    def __init__(self, model):
+        super(GFB, self).__init__()
+        self.model = model
+        self.bilinear = 32
+        self.conv16 = nn.Conv2d(12, self.bilinear, kernel_size=1, stride=1, padding=0, bias=False)
+        self.bn16 = nn.BatchNorm2d(self.bilinear)
+        self.relu = nn.ReLU(inplace=True)
+        self.avgpool = nn.AvgPool2d(7, stride=1)
+
+    def get_feature_map(self, imgx):
+        model = self.model
+        x = model.patch_embed(imgx)
+        b, n, c = x.shape
+        cls_tokens = model.cls_token.expand(b, -1, -1)
+        x = torch.cat((cls_tokens, x), dim=1)
+        x += model.pos_embed
+        x = model.pos_drop(x)
+
+        feature_map = []
+        for blk in model.blocks:
+            x = blk(x)
+            feature_map.append(x)
+        feature_map = torch.stack(feature_map, dim=1)
+        # Make the feature map of the same size of the input image
+        feature_map = F.interpolate(feature_map, size=imgx.shape[-2:], mode='bilinear', align_corners=False)
+        return feature_map
+    
+    def max_mask(self, featmap):
+        featcov16 = self.conv16(featmap)
+        featcov16 = self.bn16(featcov16)
+        featcov16 = self.relu(featcov16)
+        img, _ = torch.max(featcov16, axis=1)
+        img = img - torch.min(img)
+        att_max = img / (1e-7 + torch.max(img))
+
+        img = att_max[:, None, :, :]
+        img = img.repeat(1, 12, 1, 1)
+
+        PFM = featmap.cuda() * img.cuda()
+        aa = self.avgpool(PFM)
+        bp_out_feat = aa.view(aa.size(0), -1)
+        bp_out_feat_max = nn.functional.normalize(bp_out_feat, dim=1)
+        return bp_out_feat_max, att_max
+    
+    def __call__(self, imgx):
+        featmap = self.get_feature_map(imgx)
+        bp_out_feat_max, att_max = self.max_mask(featmap)
+        return bp_out_feat_max, att_max
+    

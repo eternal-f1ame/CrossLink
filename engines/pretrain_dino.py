@@ -1,12 +1,12 @@
 import sys
 import math
 import torch
+import torch.nn.functional as F
 from util import misc
 from util import lars
 from util import lr_sched
 from typing import Iterable
-from util.gradcam import gradmap
-
+from util.gradcam import GFB, gradmap
 
 def train_one_epoch(model: torch.nn.Module,
                     data_loader: Iterable, optimizer: torch.optim.Optimizer,
@@ -15,6 +15,8 @@ def train_one_epoch(model: torch.nn.Module,
                     args=None):
     student = model.student
     teacher = model.teacher
+    if args,gfb:
+        gfb = GFB(student)
     teacher_without_ddp = model.teacher_without_ddp
     dino_loss = model.loss
     lr_schedule = lr_sched.cosine_scheduler(
@@ -61,12 +63,17 @@ def train_one_epoch(model: torch.nn.Module,
             images_ = images
 
         if args.gradcam:
-            images[2:] = gradmap(student, images, args.local_crops_number - 2)
+            images[2:], gradcam = gradmap(student, images, args.local_crops_number - 2)
         # teacher and student forward passes + compute dino loss
         with torch.cuda.amp.autocast(fp16_scaler is not None):
             teacher_output = teacher(images_[:2]) # only the 2 global views pass through the teacher
             student_output = student(images)
             loss = dino_loss(student_output, teacher_output, epoch)
+            if args.gfb:
+                att_max = gfb(images[:2])
+                loss_cam = F.kl_div(att_max.softmax(dim=-1).log(), gradcam.softmax(dim=-1),
+                    reduction='sum')
+                loss += loss_cam
 
         if not math.isfinite(loss.item()):
             print("Loss is {}, stopping training".format(loss.item()), force=True)
