@@ -15,7 +15,7 @@ def train_one_epoch(model: torch.nn.Module,
                     args=None):
     student = model.student
     teacher = model.teacher
-    if args,gfb:
+    if args.gfb:
         gfb = GFB(student)
     teacher_without_ddp = model.teacher_without_ddp
     dino_loss = model.loss
